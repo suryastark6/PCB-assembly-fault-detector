@@ -1,0 +1,208 @@
+import cv2
+import numpy as np
+import tkinter as tk
+from tkinter import ttk, filedialog
+from ttkthemes import ThemedStyle
+from PIL import Image, ImageTk
+from scipy.cluster.hierarchy import linkage, fcluster
+import os
+
+
+class ImageComparisonApp:
+    def __init__(self, master):
+        self.master = master
+        master.title("PCB FAULT DETECTOR")
+
+        style = ThemedStyle(master)
+        style.set_theme("ubuntu")
+
+        self.reference_image_button = ttk.Button(master, text="Add Reference Image", command=self.add_reference_image)
+        self.reference_image_button.grid(row=0, column=0, padx=10, pady=10, sticky='e')
+
+        self.capture_reference_button = ttk.Button(master, text="Capture Reference from Camera",
+                                                   command=self.capture_reference_from_camera)
+        self.capture_reference_button.grid(row=1, column=0, padx=10, pady=10, sticky='e')
+
+        self.comparing_image_button = ttk.Button(master, text="Add Comparing Image", command=self.add_comparing_image)
+        self.comparing_image_button.grid(row=2, column=0, padx=10, pady=10, sticky='e')
+
+        self.capture_comparing_button = ttk.Button(master, text="Capture Comparing from Camera",
+                                                   command=self.capture_comparing_from_camera)
+        self.capture_comparing_button.grid(row=3, column=0, padx=10, pady=10, sticky='e')
+
+        self.run_button = ttk.Button(master, text="Run Comparison", command=self.run_comparison)
+        self.run_button.grid(row=4, column=0, padx=10, pady=10, sticky='e')
+
+        # Labels to display the reference and comparing images
+        self.reference_image_label = ttk.Label(master)
+        self.reference_image_label.grid(row=0, column=1, padx=10, pady=10, sticky='e')
+
+        self.comparing_image_label = ttk.Label(master)
+        self.comparing_image_label.grid(row=2, column=1, padx=10, pady=10, sticky='e')
+
+        # Label to display the output image
+        self.output_image_label = ttk.Label(master)
+        self.output_image_label.grid(row=0, column=2, rowspan=3, padx=10, pady=10)
+
+        self.reference_image_path = None
+        self.comparing_image_path = None
+
+    def add_reference_image(self):
+        self.reference_image_path = filedialog.askopenfilename()
+        print("Reference Image Added:", self.reference_image_path)
+        self.display_reference_image()
+
+    def add_comparing_image(self):
+        self.comparing_image_path = filedialog.askopenfilename()
+        print("Comparing Image Added:", self.comparing_image_path)
+        self.display_comparing_image()
+
+    def capture_reference_from_camera(self):
+        destination_folder = "captured_reference_images"
+        os.makedirs(destination_folder, exist_ok=True)
+        self.reference_image_path = self.capture_image_from_camera("reference_image", destination_folder)
+        print("Reference Image Captured:", self.reference_image_path)
+        self.display_reference_image()
+
+    def capture_comparing_from_camera(self):
+        destination_folder = "captured_comparing_images"
+        os.makedirs(destination_folder, exist_ok=True)
+        self.comparing_image_path = self.capture_image_from_camera("comparing_image", destination_folder)
+        print("Comparing Image Captured:", self.comparing_image_path)
+        self.display_comparing_image()
+
+    def capture_image_from_camera(self, filename_prefix, destination_folder):
+        cap = cv2.VideoCapture(0)  # 0 corresponds to the default camera
+        ret, frame = cap.read()
+        cap.release()
+
+        # Find the next available index for the filename
+        index = 1
+        while True:
+            image_path = os.path.join(destination_folder, f"{filename_prefix}_{index}.jpg")
+            if not os.path.exists(image_path):
+                break
+            index += 1
+
+        cv2.imwrite(image_path, frame)
+        return image_path
+
+    def run_comparison(self):
+        if self.reference_image_path is None or self.comparing_image_path is None:
+            print("Please add both reference and comparing images or capture from the camera.")
+            return
+
+        img1 = cv2.imread(self.reference_image_path, cv2.IMREAD_COLOR)
+        img2 = cv2.imread(self.comparing_image_path, cv2.IMREAD_COLOR)
+
+        marked_img = self.compare_images(img1, img2)
+
+        self.display_output_image(marked_img)
+
+    def compare_images(self, img1, img2):
+        gray1 = cv2.cvtColor(img1, cv2.COLOR_BGR2GRAY)
+        gray2 = cv2.cvtColor(img2, cv2.COLOR_BGR2GRAY)
+
+        sift = cv2.SIFT_create(nfeatures=500, contrastThreshold=0.04, edgeThreshold=10)
+        keypoints1, descriptors1 = sift.detectAndCompute(gray1, None)
+        keypoints2, descriptors2 = sift.detectAndCompute(gray2, None)
+
+        matcher = cv2.FlannBasedMatcher()
+        matches = matcher.knnMatch(descriptors1, descriptors2, k=2)
+
+        good_matches = []
+        for m, n in matches:
+            if m.distance < 0.7 * n.distance:
+                good_matches.append(m)
+
+        img_matches = cv2.drawMatches(img1, keypoints1, img2, keypoints2, good_matches, None,
+                                      flags=cv2.DrawMatchesFlags_NOT_DRAW_SINGLE_POINTS)
+
+        src_pts = np.float32([keypoints1[m.queryIdx].pt for m in good_matches]).reshape(-1, 1, 2)
+        dst_pts = np.float32([keypoints2[m.trainIdx].pt for m in good_matches]).reshape(-1, 1, 2)
+        transformation_matrix, mask = cv2.findHomography(src_pts, dst_pts, cv2.RANSAC, 5.0)
+
+        aligned_img1 = cv2.warpPerspective(img1, transformation_matrix, (img2.shape[1], img2.shape[0]))
+
+        aligned_gray1 = cv2.cvtColor(aligned_img1, cv2.COLOR_BGR2GRAY)
+
+        aligned_gray1_filtered = cv2.medianBlur(aligned_gray1, 5)
+        gray2_filtered = cv2.medianBlur(gray2, 5)
+
+        thresh1 = cv2.adaptiveThreshold(aligned_gray1_filtered, 255, cv2.ADAPTIVE_THRESH_MEAN_C, cv2.THRESH_BINARY_INV,
+                                        11, 2)
+        thresh2 = cv2.adaptiveThreshold(gray2_filtered, 255, cv2.ADAPTIVE_THRESH_MEAN_C, cv2.THRESH_BINARY_INV, 11, 2)
+
+        kernel = np.ones((3, 3), np.uint8)
+        thresh1_closed = cv2.morphologyEx(thresh1, cv2.MORPH_CLOSE, kernel)
+        thresh2_closed = cv2.morphologyEx(thresh2, cv2.MORPH_CLOSE, kernel)
+
+        kernel_erosion = np.ones((3, 3), np.uint8)
+        res = cv2.erode(cv2.bitwise_xor(thresh1_closed, thresh2_closed), kernel_erosion, iterations=1)
+
+        contours, _ = cv2.findContours(res, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+
+        clustered_contours = self.cluster_contours(contours, max_distance=30, min_contour_area=50)
+
+        marked_img = aligned_img1.copy()
+        for cluster in clustered_contours:
+            if cluster:
+                (x, y, w, h) = cv2.boundingRect(np.vstack(cluster))
+                center = (int(x + w / 2), int(y + h / 2))
+                radius = int(max(w, h) / 2)
+                cv2.circle(marked_img, center, radius, (0, 0, 255), 2)
+
+        resize_scale = 0.2
+        resized_img = cv2.resize(marked_img, None, fx=resize_scale, fy=resize_scale)
+
+        return resized_img
+
+    def display_reference_image(self):
+        if self.reference_image_path:
+            img = Image.open(self.reference_image_path)
+            img = img.resize((200, 150), Image.ANTIALIAS if hasattr(Image, 'ANTIALIAS') else Image.BICUBIC)
+            img = ImageTk.PhotoImage(img)
+            self.reference_image_label.configure(image=img)
+            self.reference_image_label.image = img
+
+    def display_comparing_image(self):
+        if self.comparing_image_path:
+            img = Image.open(self.comparing_image_path)
+            img = img.resize((200, 150), Image.ANTIALIAS if hasattr(Image, 'ANTIALIAS') else Image.BICUBIC)
+            img = ImageTk.PhotoImage(img)
+            self.comparing_image_label.configure(image=img)
+            self.comparing_image_label.image = img
+
+    def display_output_image(self, img):
+        img = Image.fromarray(cv2.cvtColor(img, cv2.COLOR_BGR2RGB))
+        img = img.resize((800, 600), Image.ANTIALIAS if hasattr(Image, 'ANTIALIAS') else Image.BICUBIC)
+
+        img = ImageTk.PhotoImage(img)
+        self.output_image_label.configure(image=img)
+        self.output_image_label.image = img
+
+    def cluster_contours(self, contours, max_distance=30, min_contour_area=50):
+        points = np.vstack([np.mean(cnt, axis=0) for cnt in contours])
+        distance_matrix = linkage(points, 'ward')
+        clusters = fcluster(distance_matrix, max_distance, criterion='distance')
+
+        clustered_contours = []
+        for label in np.unique(clusters):
+            cluster_indices = np.where(clusters == label)[0]
+            cluster = [contours[i] for i in cluster_indices]
+
+            cluster = [cnt for cnt in cluster if cv2.contourArea(cnt) >= min_contour_area]
+
+            clustered_contours.append(cluster)
+
+        return clustered_contours
+
+
+def main():
+    root = tk.Tk()
+    app = ImageComparisonApp(root)
+    root.mainloop()
+
+
+if __name__ == "__main__":
+    main()
